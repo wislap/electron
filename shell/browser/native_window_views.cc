@@ -40,6 +40,16 @@
 #include "shell/common/options_switches.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/hit_test.h"
+#include "ui/platform_window/platform_window.h"
+#include "ui/views/background.h"
+#include "ui/views/controls/webview/webview.h"
+#include "ui/views/view_utils.h"
+#include "ui/views/widget/desktop_aura/desktop_window_tree_host_linux.h"
+#include "ui/views/widget/native_widget_private.h"
+#include "ui/views/widget/widget.h"
+#include "ui/views/window/client_view.h"
+#include "ui/views/window/frame_view.h"
+#include "ui/views/window/non_client_view.h"
 #include "ui/compositor/compositor.h"
 #include "ui/display/screen.h"
 #include "ui/gfx/geometry/insets.h"
@@ -47,14 +57,6 @@
 #include "ui/gfx/image/image.h"
 #include "ui/gfx/native_ui_types.h"
 #include "ui/ozone/public/ozone_platform.h"
-#include "ui/views/background.h"
-#include "ui/views/controls/webview/webview.h"
-#include "ui/views/view_utils.h"
-#include "ui/views/widget/native_widget_private.h"
-#include "ui/views/widget/widget.h"
-#include "ui/views/window/client_view.h"
-#include "ui/views/window/frame_view.h"
-#include "ui/views/window/non_client_view.h"
 #include "ui/wm/core/shadow_types.h"
 #include "ui/wm/core/window_util.h"
 
@@ -1134,18 +1136,16 @@ bool NativeWindowViews::IsClosable() const {
 #endif
 }
 
-void NativeWindowViews::SetAlwaysOnTop(const ui::ZOrderLevel z_order,
+void NativeWindowViews::SetAlwaysOnTop(ui::ZOrderLevel z_order,
                                        const std::string& level,
-                                       const int relativeLevel) {
-  const bool level_changed = z_order != widget()->GetZOrderLevel();
-  const bool always_on_top = z_order != ui::ZOrderLevel::kNormal;
-
+                                       int relativeLevel) {
+  bool level_changed = z_order != widget()->GetZOrderLevel();
   widget()->SetZOrderLevel(z_order);
 
 #if BUILDFLAG(IS_WIN)
   // Reset the placement flag.
   behind_task_bar_ = false;
-  if (always_on_top) {
+  if (z_order != ui::ZOrderLevel::kNormal) {
     // On macOS the window is placed behind the Dock for the following levels.
     // Re-use the same names on Windows to make it easier for the user.
     static constexpr auto levels = base::MakeFixedFlatSet<std::string_view>(
@@ -1155,8 +1155,10 @@ void NativeWindowViews::SetAlwaysOnTop(const ui::ZOrderLevel z_order,
 #endif
   MoveBehindTaskBarIfNeeded();
 
+  // This must be notified at the very end or IsAlwaysOnTop
+  // will not yet have been updated to reflect the new status
   if (level_changed)
-    NativeWindow::NotifyWindowAlwaysOnTopChanged(always_on_top);
+    NativeWindow::NotifyWindowAlwaysOnTopChanged();
 }
 
 ui::ZOrderLevel NativeWindowViews::GetZOrderLevel() const {
@@ -1349,6 +1351,16 @@ void NativeWindowViews::SetIgnoreMouseEvents(bool ignore, bool forward) {
               static_cast<x11::Window>(GetAcceleratedWidget()),
           .source_bitmap = x11::Pixmap::None,
       });
+    }
+  } else {
+    // Wayland: delegate to the host to control input region.
+    // The host's UpdateFrameHints() will apply the ignore state while
+    // preserving CSD shadow regions.
+    auto* host = views::DesktopWindowTreeHostLinux::GetHostForWidget(
+        widget()->GetNativeWindow()->GetHost()->GetAcceleratedWidget());
+    if (auto* electron_host =
+            static_cast<ElectronDesktopWindowTreeHostLinux*>(host)) {
+      electron_host->SetIgnoreMouseEvents(ignore);
     }
   }
 #endif
